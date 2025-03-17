@@ -165,7 +165,7 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
             // Scan assignments periodically.
             scanAssignmentsFuture = scheduler.scheduleWithFixedDelay(() -> {
                 if (!isRunning()) {
-                    log.info("The rocketmq push consumer is not running, maybe starting or shutting down, clientId={}", clientId);
+                    log.info("PushConsumer is not running, maybe starting or shutting down, clientId={}", clientId);
                     return;
                 }
                 try {
