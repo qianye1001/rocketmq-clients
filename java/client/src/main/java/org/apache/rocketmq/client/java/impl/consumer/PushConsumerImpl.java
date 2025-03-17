@@ -164,6 +164,10 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
             this.consumeService = createConsumeService();
             // Scan assignments periodically.
             scanAssignmentsFuture = scheduler.scheduleWithFixedDelay(() -> {
+                if (!isRunning()) {
+                    log.info("The rocketmq push consumer is not running, maybe starting or shutting down, clientId={}", clientId);
+                    return;
+                }
                 try {
                     scanAssignments();
                 } catch (Throwable t) {
@@ -184,9 +188,9 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
         if (null != scanAssignmentsFuture) {
             scanAssignmentsFuture.cancel(false);
         }
-        super.shutDown();
         this.consumptionExecutor.shutdown();
         ExecutorServices.awaitTerminated(consumptionExecutor);
+        super.shutDown();
         log.info("Shutdown the rocketmq push consumer successfully, clientId={}", clientId);
     }
 
