@@ -29,7 +29,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import org.apache.rocketmq.client.apis.ClientException;
-import org.apache.rocketmq.client.apis.consumer.BatchPolicy;
 import org.apache.rocketmq.client.apis.consumer.SimpleConsumer;
 import org.apache.rocketmq.client.apis.message.MessageView;
 import org.slf4j.Logger;
@@ -38,6 +37,11 @@ import org.slf4j.LoggerFactory;
 /**
  * Background worker that fulfills {@link BatchRequest}s by fetching messages from a delegate
  * {@link SimpleConsumer} and buffering them locally.
+ *
+ * <p>This worker is generic: the same fetch loop serves both <strong>batch receive</strong>
+ * (accumulate until count/bytes/timeout) and <strong>cached receive</strong> (return immediately
+ * from overflow or after a single fetch) — the difference is entirely determined by the
+ * {@link BatchRequest} parameters ({@code maxWaitNanos = 0} means no accumulation wait).
  *
  * <p><strong>Demand-driven</strong>: the worker blocks on {@link BlockingQueue#take()} when no
  * requests are pending, producing zero server traffic.
@@ -52,7 +56,6 @@ final class BatchFetchWorker {
     private static final int FETCH_BATCH_SIZE = 32;
 
     private final SimpleConsumer delegate;
-    private final BatchPolicy batchPolicy;
 
     /**
      * Single-threaded executor that runs {@link #fetchLoop()}.
@@ -79,9 +82,8 @@ final class BatchFetchWorker {
 
     private volatile boolean closed = false;
 
-    BatchFetchWorker(SimpleConsumer delegate, BatchPolicy batchPolicy) {
+    BatchFetchWorker(SimpleConsumer delegate) {
         this.delegate = delegate;
-        this.batchPolicy = batchPolicy;
         this.fetchExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "BatchingSimpleConsumer-fetch");
             t.setDaemon(true);
@@ -200,8 +202,11 @@ final class BatchFetchWorker {
             while (!closed && !request.future.isDone()) {
                 List<MessageView> received;
                 try {
+                    // Compensate invisible duration by the request's max wait time so that
+                    // messages remain invisible long enough to cover the accumulation window.
+                    // For non-batch requests (maxWaitNanos=0), no compensation is added.
                     Duration effectiveInvisible = request.invisibleDuration
-                        .plus(batchPolicy.getMaxWaitTime());
+                        .plus(Duration.ofNanos(request.maxWaitNanos));
                     received = delegate.receive(FETCH_BATCH_SIZE, effectiveInvisible);
                 } catch (ClientException e) {
                     if (closed || Thread.currentThread().isInterrupted()) {

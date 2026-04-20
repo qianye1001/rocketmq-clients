@@ -60,8 +60,8 @@ public class BatchFetchWorkerTest extends TestBase {
         }
     }
 
-    private BatchFetchWorker createAndStartWorker(BatchPolicy policy) {
-        BatchFetchWorker w = new BatchFetchWorker(delegate, policy);
+    private BatchFetchWorker createAndStartWorker() {
+        BatchFetchWorker w = new BatchFetchWorker(delegate);
         w.start();
         return w;
     }
@@ -85,7 +85,7 @@ public class BatchFetchWorkerTest extends TestBase {
     public void testBatchCompletedByCount() throws Exception {
         final int maxBatch = 3;
         BatchPolicy policy = new BatchPolicy(maxBatch, Duration.ofSeconds(5));
-        worker = createAndStartWorker(policy);
+        worker = createAndStartWorker();
 
         // Delegate returns exactly maxBatch messages on first call.
         when(delegate.receive(anyInt(), any(Duration.class)))
@@ -111,7 +111,7 @@ public class BatchFetchWorkerTest extends TestBase {
         final int maxBatchSize = 100; // high count limit, won't be hit
 
         BatchPolicy policy = new BatchPolicy(maxBatchSize, maxBatchBytes, Duration.ofSeconds(5));
-        worker = createAndStartWorker(policy);
+        worker = createAndStartWorker();
 
         // Return 5 messages at once; only 2 should be in the batch, rest overflows.
         when(delegate.receive(anyInt(), any(Duration.class)))
@@ -134,7 +134,7 @@ public class BatchFetchWorkerTest extends TestBase {
         final int maxBatch = 100; // won't be hit by count
         final Duration maxWait = Duration.ofMillis(300);
         BatchPolicy policy = new BatchPolicy(maxBatch, maxWait);
-        worker = createAndStartWorker(policy);
+        worker = createAndStartWorker();
 
         // First call returns 2 messages, second call blocks forever (simulate no more data).
         when(delegate.receive(anyInt(), any(Duration.class)))
@@ -162,7 +162,7 @@ public class BatchFetchWorkerTest extends TestBase {
     public void testOverflowBufferFeedsNextRequest() throws Exception {
         final int maxBatch = 2;
         BatchPolicy policy = new BatchPolicy(maxBatch, Duration.ofSeconds(5));
-        worker = createAndStartWorker(policy);
+        worker = createAndStartWorker();
 
         // Delegate returns 5 messages on first call; only 2 needed for first request,
         // 3 go to overflow. Second request should be served from overflow without calling delegate again.
@@ -192,7 +192,7 @@ public class BatchFetchWorkerTest extends TestBase {
     public void testFifoOrdering() throws Exception {
         final int maxBatch = 1;
         BatchPolicy policy = new BatchPolicy(maxBatch, Duration.ofSeconds(5));
-        worker = createAndStartWorker(policy);
+        worker = createAndStartWorker();
 
         // Each call returns exactly 1 message.
         when(delegate.receive(anyInt(), any(Duration.class)))
@@ -227,7 +227,7 @@ public class BatchFetchWorkerTest extends TestBase {
     public void testShutdownReturnsBufferedMessages() throws Exception {
         final int maxBatch = 100; // won't be filled
         BatchPolicy policy = new BatchPolicy(maxBatch, Duration.ofSeconds(30));
-        worker = createAndStartWorker(policy);
+        worker = createAndStartWorker();
 
         // Delegate returns 3 messages, then blocks forever.
         when(delegate.receive(anyInt(), any(Duration.class)))
@@ -261,7 +261,7 @@ public class BatchFetchWorkerTest extends TestBase {
     @Test
     public void testShutdownNoPendingReturnsEmpty() {
         BatchPolicy policy = new BatchPolicy(10, Duration.ofSeconds(5));
-        worker = createAndStartWorker(policy);
+        worker = createAndStartWorker();
 
         List<MessageView> remaining = worker.shutdown();
         worker = null;
@@ -277,7 +277,7 @@ public class BatchFetchWorkerTest extends TestBase {
     public void testDelegateExceptionRetries() throws Exception {
         final int maxBatch = 2;
         BatchPolicy policy = new BatchPolicy(maxBatch, Duration.ofSeconds(5));
-        worker = createAndStartWorker(policy);
+        worker = createAndStartWorker();
 
         // First call throws, second call succeeds.
         when(delegate.receive(anyInt(), any(Duration.class)))
@@ -301,7 +301,7 @@ public class BatchFetchWorkerTest extends TestBase {
     public void testMultipleFetchesAccumulate() throws Exception {
         final int maxBatch = 5;
         BatchPolicy policy = new BatchPolicy(maxBatch, Duration.ofSeconds(5));
-        worker = createAndStartWorker(policy);
+        worker = createAndStartWorker();
 
         // Each call returns 2 messages; need 3 calls to reach 5 (2+2+2, but 5 triggers at 5th msg).
         when(delegate.receive(anyInt(), any(Duration.class)))
@@ -325,7 +325,7 @@ public class BatchFetchWorkerTest extends TestBase {
     @Test
     public void testDemandDrivenNoReceiveWithoutRequest() throws Exception {
         BatchPolicy policy = new BatchPolicy(10, Duration.ofSeconds(5));
-        worker = createAndStartWorker(policy);
+        worker = createAndStartWorker();
 
         // Let the worker run idle for a bit.
         Thread.sleep(500);
@@ -344,7 +344,7 @@ public class BatchFetchWorkerTest extends TestBase {
         final int maxBatch = 1;
         final int threadCount = 10;
         BatchPolicy policy = new BatchPolicy(maxBatch, Duration.ofSeconds(5));
-        worker = createAndStartWorker(policy);
+        worker = createAndStartWorker();
 
         when(delegate.receive(anyInt(), any(Duration.class)))
             .thenAnswer(invocation -> fakeMessages(1, 10));
@@ -387,7 +387,7 @@ public class BatchFetchWorkerTest extends TestBase {
     public void testIsFullByCountExact() throws Exception {
         final int maxBatch = 3;
         BatchPolicy policy = new BatchPolicy(maxBatch, Duration.ofSeconds(5));
-        worker = createAndStartWorker(policy);
+        worker = createAndStartWorker();
 
         // Return exactly maxBatch messages.
         when(delegate.receive(anyInt(), any(Duration.class)))
@@ -413,7 +413,7 @@ public class BatchFetchWorkerTest extends TestBase {
         final int maxBatchSize = 100;
 
         BatchPolicy policy = new BatchPolicy(maxBatchSize, maxBatchBytes, Duration.ofSeconds(5));
-        worker = createAndStartWorker(policy);
+        worker = createAndStartWorker();
 
         // Return 4 messages; first batch takes 2, overflow gets 2.
         when(delegate.receive(anyInt(), any(Duration.class)))
@@ -441,7 +441,7 @@ public class BatchFetchWorkerTest extends TestBase {
     @Test
     public void testShutdownCancelsPendingRequests() throws Exception {
         BatchPolicy policy = new BatchPolicy(100, Duration.ofSeconds(30));
-        worker = createAndStartWorker(policy);
+        worker = createAndStartWorker();
 
         // Delegate blocks forever, so requests never complete.
         when(delegate.receive(anyInt(), any(Duration.class)))

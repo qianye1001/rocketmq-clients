@@ -34,32 +34,37 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * A {@link SimpleConsumer} decorator that adds client-side message buffering to support
- * {@link #batchReceive(Duration)} and {@link #batchReceiveAsync(Duration)} semantics.
+ * A {@link SimpleConsumer} decorator that adds client-side message buffering.
+ *
+ * <p>Both {@link #receive(int, Duration)} and {@link #batchReceive(Duration)} go through the same
+ * {@link BatchFetchWorker}, sharing a single overflow buffer.  The difference in behavior is
+ * purely determined by the {@link BatchRequest} parameters:
+ * <ul>
+ *   <li><strong>{@code receive(n, duration)}</strong>: submits a request with
+ *       {@code maxBatchSize=n, maxWaitNanos=0} — returns immediately from cache or after a
+ *       single server fetch, surplus messages are buffered for subsequent calls.</li>
+ *   <li><strong>{@code batchReceive(duration)}</strong>: submits a request with
+ *       {@code maxBatchSize/maxBatchBytes/maxWaitNanos} from {@link BatchPolicy} — accumulates
+ *       until the batch is full or the timeout fires.</li>
+ * </ul>
  *
  * <h3>Design</h3>
  * <ul>
  *   <li><strong>Demand-driven fetching</strong>: the {@link BatchFetchWorker} is idle when there
- *       are no pending {@code batchReceive} requests.  It only calls
- *       {@link SimpleConsumer#receive(int, Duration)} on the delegate when at least one request
- *       is queued, avoiding unnecessary server load.</li>
- *   <li><strong>FIFO request ordering</strong>: multiple concurrent {@code batchReceive} /
- *       {@code batchReceiveAsync} calls are queued and fulfilled strictly in the order they
- *       were submitted.</li>
- *   <li><strong>No polling loops in the caller</strong>: {@code batchReceive} blocks on a
- *       {@link CompletableFuture#get()} and is woken up by the worker via
- *       {@link CompletableFuture#complete(Object)} or a scheduled timeout task.</li>
+ *       are no pending requests.  It only calls {@link SimpleConsumer#receive(int, Duration)} on
+ *       the delegate when at least one request is queued.</li>
+ *   <li><strong>FIFO request ordering</strong>: all calls are queued and fulfilled strictly in
+ *       the order they were submitted.</li>
+ *   <li><strong>Unified cache</strong>: overflow from any receive call is available to
+ *       subsequent calls, regardless of whether they are batch or non-batch.</li>
  *   <li><strong>Graceful shutdown</strong>: on {@link #close()}, any messages still buffered
- *       internally have their invisible duration shortened to 1 second via
- *       {@link SimpleConsumer#changeInvisibleDuration(MessageView, Duration)} so that they
- *       become visible to other consumers promptly.</li>
- *   <li>{@link #batchAck(List)} delegates directly to the underlying consumer's true
- *       batch-ack implementation, which sends all entries in a single network round-trip.</li>
+ *       internally have their invisible duration shortened to 1 second so that they become
+ *       visible to other consumers promptly.</li>
  * </ul>
  *
  * <h3>Thread safety</h3>
- * {@link #batchReceive(Duration)} and {@link #batchReceiveAsync(Duration)} are safe to call from
- * multiple threads.  Requests are enqueued atomically and processed by a single worker thread.
+ * All receive methods are safe to call from multiple threads.  Requests are enqueued atomically
+ * and processed by a single worker thread.
  *
  * @see BatchFetchWorker
  * @see BatchRequest
@@ -79,7 +84,7 @@ public class BatchingSimpleConsumer implements SimpleConsumer {
         checkNotNull(batchPolicy, "batchPolicy should not be null");
         this.delegate = delegate;
         this.batchPolicy = batchPolicy;
-        this.worker = new BatchFetchWorker(delegate, batchPolicy);
+        this.worker = new BatchFetchWorker(delegate);
     }
 
     /**
@@ -184,16 +189,47 @@ public class BatchingSimpleConsumer implements SimpleConsumer {
         return delegate.getSubscriptionExpressions();
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Submits a request with {@code maxWaitNanos=0} to the shared worker.  If the overflow
+     * buffer has cached messages, they are returned immediately without hitting the server.
+     * Otherwise, the worker fetches from the server and returns up to {@code maxMessageNum}
+     * messages, caching any surplus for subsequent calls.
+     */
     @Override
     public List<MessageView> receive(int maxMessageNum, Duration invisibleDuration)
         throws ClientException {
-        return delegate.receive(maxMessageNum, invisibleDuration);
+        final CompletableFuture<List<MessageView>> future = receiveAsync(maxMessageNum,
+            invisibleDuration);
+        try {
+            return future.get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new ClientException("Interrupted while waiting for receive");
+        } catch (ExecutionException e) {
+            final Throwable cause = e.getCause();
+            if (cause instanceof ClientException) {
+                throw (ClientException) cause;
+            }
+            throw new ClientException("Receive failed", cause);
+        }
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Submits a request with {@code maxWaitNanos=0} to the shared worker and returns a
+     * future immediately.  The same overflow buffer is shared with batch requests.
+     */
     @Override
     public CompletableFuture<List<MessageView>> receiveAsync(int maxMessageNum,
         Duration invisibleDuration) {
-        return delegate.receiveAsync(maxMessageNum, invisibleDuration);
+        checkNotNull(invisibleDuration, "invisibleDuration should not be null");
+        final BatchRequest request = new BatchRequest(
+            maxMessageNum, Long.MAX_VALUE, 0L, invisibleDuration);
+        worker.submit(request);
+        return request.future;
     }
 
     @Override
