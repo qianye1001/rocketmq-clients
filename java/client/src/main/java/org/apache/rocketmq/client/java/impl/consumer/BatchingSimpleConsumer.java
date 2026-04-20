@@ -181,6 +181,7 @@ public class BatchingSimpleConsumer implements SimpleConsumer {
     @Override
     public SimpleConsumer unsubscribe(String topic) throws ClientException {
         delegate.unsubscribe(topic);
+        worker.evictTopic(topic);
         return this;
     }
 
@@ -242,6 +243,30 @@ public class BatchingSimpleConsumer implements SimpleConsumer {
         return delegate.ackAsync(messageView);
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Topic-specific receive delegates directly to the underlying consumer, bypassing
+     * the shared overflow buffer.  This gives the caller precise control over which
+     * topic to poll, avoiding head-of-line blocking caused by empty topics.
+     */
+    @Override
+    public List<MessageView> receive(String topic, int maxMessageNum, Duration invisibleDuration)
+        throws ClientException {
+        return delegate.receive(topic, maxMessageNum, invisibleDuration);
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Async variant of topic-specific receive; delegates directly to the underlying consumer.
+     */
+    @Override
+    public CompletableFuture<List<MessageView>> receiveAsync(String topic, int maxMessageNum,
+        Duration invisibleDuration) {
+        return delegate.receiveAsync(topic, maxMessageNum, invisibleDuration);
+    }
+
     @Override
     public void changeInvisibleDuration(MessageView messageView, Duration invisibleDuration)
         throws ClientException {
@@ -249,9 +274,21 @@ public class BatchingSimpleConsumer implements SimpleConsumer {
     }
 
     @Override
+    public void changeInvisibleDuration(MessageView messageView, Duration invisibleDuration, boolean suspend)
+        throws ClientException {
+        delegate.changeInvisibleDuration(messageView, invisibleDuration, suspend);
+    }
+
+    @Override
     public CompletableFuture<Void> changeInvisibleDurationAsync(MessageView messageView,
         Duration invisibleDuration) {
         return delegate.changeInvisibleDurationAsync(messageView, invisibleDuration);
+    }
+
+    @Override
+    public CompletableFuture<Void> changeInvisibleDurationAsync(MessageView messageView,
+        Duration invisibleDuration, boolean suspend) {
+        return delegate.changeInvisibleDurationAsync(messageView, invisibleDuration, suspend);
     }
 
     // -------------------------------------------------------------------------
@@ -267,7 +304,7 @@ public class BatchingSimpleConsumer implements SimpleConsumer {
         //    so that the server makes them visible to other consumers quickly.
         for (MessageView m : remaining) {
             try {
-                delegate.changeInvisibleDuration(m, RELEASE_INVISIBLE_DURATION);
+                delegate.changeInvisibleDuration(m, RELEASE_INVISIBLE_DURATION, true);
                 log.info("Released buffered message on close, messageId={}", m.getMessageId());
             } catch (Throwable t) {
                 log.warn("Failed to shorten invisible duration for buffered message, messageId={}",

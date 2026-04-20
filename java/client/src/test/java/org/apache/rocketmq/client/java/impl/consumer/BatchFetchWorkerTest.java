@@ -20,7 +20,9 @@ package org.apache.rocketmq.client.java.impl.consumer;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -28,16 +30,19 @@ import static org.mockito.Mockito.when;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import org.apache.rocketmq.client.apis.ClientException;
 import org.apache.rocketmq.client.apis.consumer.BatchPolicy;
+import org.apache.rocketmq.client.apis.consumer.FilterExpression;
 import org.apache.rocketmq.client.apis.consumer.SimpleConsumer;
 import org.apache.rocketmq.client.apis.message.MessageView;
 import org.apache.rocketmq.client.java.tool.TestBase;
 import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
@@ -54,6 +59,14 @@ public class BatchFetchWorkerTest extends TestBase {
     private SimpleConsumer delegate;
 
     private BatchFetchWorker worker;
+
+    @Before
+    public void setUp() throws Exception {
+        // Default subscription: one topic so concurrentFetchAllTopics has a target.
+        Map<String, FilterExpression> subs = new HashMap<>();
+        subs.put("test-topic", FilterExpression.SUB_ALL);
+        when(delegate.getSubscriptionExpressions()).thenReturn(subs);
+    }
 
     @After
     public void tearDown() {
@@ -95,8 +108,8 @@ public class BatchFetchWorkerTest extends TestBase {
         worker = createAndStartWorker();
 
         // Delegate returns exactly maxBatch messages on first call.
-        when(delegate.receive(anyInt(), any(Duration.class)))
-            .thenReturn(fakeMessages(maxBatch, 10));
+        when(delegate.receiveAsync(anyString(), anyInt(), any(Duration.class)))
+            .thenReturn(CompletableFuture.completedFuture(fakeMessages(maxBatch, 10)));
 
         BatchRequest request = new BatchRequest(maxBatch, Long.MAX_VALUE,
             policy.getMaxWaitTime().toNanos(), INVISIBLE_DURATION);
@@ -121,8 +134,8 @@ public class BatchFetchWorkerTest extends TestBase {
         worker = createAndStartWorker();
 
         // Return 5 messages at once; only 2 should be in the batch, rest overflows.
-        when(delegate.receive(anyInt(), any(Duration.class)))
-            .thenReturn(fakeMessages(5, bodySize));
+        when(delegate.receiveAsync(anyString(), anyInt(), any(Duration.class)))
+            .thenReturn(CompletableFuture.completedFuture(fakeMessages(5, bodySize)));
 
         BatchRequest request = new BatchRequest(maxBatchSize, maxBatchBytes,
             policy.getMaxWaitTime().toNanos(), INVISIBLE_DURATION);
@@ -144,12 +157,11 @@ public class BatchFetchWorkerTest extends TestBase {
         worker = createAndStartWorker();
 
         // First call returns 2 messages, second call blocks forever (simulate no more data).
-        when(delegate.receive(anyInt(), any(Duration.class)))
-            .thenReturn(fakeMessages(2, 10))
-            .thenAnswer((Answer<List<MessageView>>) invocation -> {
-                // Block until interrupted
-                Thread.sleep(60_000);
-                return Collections.emptyList();
+        when(delegate.receiveAsync(anyString(), anyInt(), any(Duration.class)))
+            .thenReturn(CompletableFuture.completedFuture(fakeMessages(2, 10)))
+            .thenAnswer((Answer<CompletableFuture<List<MessageView>>>) invocation -> {
+                // Return a future that never completes
+                return new CompletableFuture<>();
             });
 
         BatchRequest request = new BatchRequest(maxBatch, Long.MAX_VALUE,
@@ -173,8 +185,8 @@ public class BatchFetchWorkerTest extends TestBase {
 
         // Delegate returns 5 messages on first call; only 2 needed for first request,
         // 3 go to overflow. Second request should be served from overflow without calling delegate again.
-        when(delegate.receive(anyInt(), any(Duration.class)))
-            .thenReturn(fakeMessages(5, 10));
+        when(delegate.receiveAsync(anyString(), anyInt(), any(Duration.class)))
+            .thenReturn(CompletableFuture.completedFuture(fakeMessages(5, 10)));
 
         // First request
         BatchRequest req1 = new BatchRequest(maxBatch, Long.MAX_VALUE,
@@ -202,8 +214,8 @@ public class BatchFetchWorkerTest extends TestBase {
         worker = createAndStartWorker();
 
         // Each call returns exactly 1 message.
-        when(delegate.receive(anyInt(), any(Duration.class)))
-            .thenAnswer(invocation -> fakeMessages(1, 10));
+        when(delegate.receiveAsync(anyString(), anyInt(), any(Duration.class)))
+            .thenAnswer(invocation -> CompletableFuture.completedFuture(fakeMessages(1, 10)));
 
         BatchRequest req1 = new BatchRequest(maxBatch, Long.MAX_VALUE,
             policy.getMaxWaitTime().toNanos(), INVISIBLE_DURATION);
@@ -237,12 +249,9 @@ public class BatchFetchWorkerTest extends TestBase {
         worker = createAndStartWorker();
 
         // Delegate returns 3 messages, then blocks forever.
-        when(delegate.receive(anyInt(), any(Duration.class)))
-            .thenReturn(fakeMessages(3, 10))
-            .thenAnswer(invocation -> {
-                Thread.sleep(60_000);
-                return Collections.emptyList();
-            });
+        when(delegate.receiveAsync(anyString(), anyInt(), any(Duration.class)))
+            .thenReturn(CompletableFuture.completedFuture(fakeMessages(3, 10)))
+            .thenAnswer(invocation -> new CompletableFuture<List<MessageView>>());
 
         BatchRequest request = new BatchRequest(maxBatch, Long.MAX_VALUE,
             policy.getMaxWaitTime().toNanos(), INVISIBLE_DURATION);
@@ -286,10 +295,10 @@ public class BatchFetchWorkerTest extends TestBase {
         BatchPolicy policy = new BatchPolicy(maxBatch, Duration.ofSeconds(5));
         worker = createAndStartWorker();
 
-        // First call throws, second call succeeds.
-        when(delegate.receive(anyInt(), any(Duration.class)))
-            .thenThrow(new ClientException("transient error"))
-            .thenReturn(fakeMessages(maxBatch, 10));
+        // First call fails, second call succeeds.
+        when(delegate.receiveAsync(anyString(), anyInt(), any(Duration.class)))
+            .thenReturn(failedFuture(new RuntimeException("transient error")))
+            .thenReturn(CompletableFuture.completedFuture(fakeMessages(maxBatch, 10)));
 
         BatchRequest request = new BatchRequest(maxBatch, Long.MAX_VALUE,
             policy.getMaxWaitTime().toNanos(), INVISIBLE_DURATION);
@@ -311,10 +320,10 @@ public class BatchFetchWorkerTest extends TestBase {
         worker = createAndStartWorker();
 
         // Each call returns 2 messages; need 3 calls to reach 5 (2+2+2, but 5 triggers at 5th msg).
-        when(delegate.receive(anyInt(), any(Duration.class)))
-            .thenReturn(fakeMessages(2, 10))
-            .thenReturn(fakeMessages(2, 10))
-            .thenReturn(fakeMessages(2, 10));
+        when(delegate.receiveAsync(anyString(), anyInt(), any(Duration.class)))
+            .thenReturn(CompletableFuture.completedFuture(fakeMessages(2, 10)))
+            .thenReturn(CompletableFuture.completedFuture(fakeMessages(2, 10)))
+            .thenReturn(CompletableFuture.completedFuture(fakeMessages(2, 10)));
 
         BatchRequest request = new BatchRequest(maxBatch, Long.MAX_VALUE,
             policy.getMaxWaitTime().toNanos(), INVISIBLE_DURATION);
@@ -337,9 +346,9 @@ public class BatchFetchWorkerTest extends TestBase {
         // Let the worker run idle for a bit.
         Thread.sleep(500);
 
-        // Delegate.receive should never have been called.
+        // Delegate.receiveAsync should never have been called.
         org.mockito.Mockito.verify(delegate, org.mockito.Mockito.never())
-            .receive(anyInt(), any(Duration.class));
+            .receiveAsync(anyString(), anyInt(), any(Duration.class));
     }
 
     // -----------------------------------------------------------------------
@@ -353,8 +362,8 @@ public class BatchFetchWorkerTest extends TestBase {
         BatchPolicy policy = new BatchPolicy(maxBatch, Duration.ofSeconds(5));
         worker = createAndStartWorker();
 
-        when(delegate.receive(anyInt(), any(Duration.class)))
-            .thenAnswer(invocation -> fakeMessages(1, 10));
+        when(delegate.receiveAsync(anyString(), anyInt(), any(Duration.class)))
+            .thenAnswer(invocation -> CompletableFuture.completedFuture(fakeMessages(1, 10)));
 
         CountDownLatch startLatch = new CountDownLatch(1);
         CountDownLatch doneLatch = new CountDownLatch(threadCount);
@@ -397,8 +406,8 @@ public class BatchFetchWorkerTest extends TestBase {
         worker = createAndStartWorker();
 
         // Return exactly maxBatch messages.
-        when(delegate.receive(anyInt(), any(Duration.class)))
-            .thenReturn(fakeMessages(maxBatch, 10));
+        when(delegate.receiveAsync(anyString(), anyInt(), any(Duration.class)))
+            .thenReturn(CompletableFuture.completedFuture(fakeMessages(maxBatch, 10)));
 
         BatchRequest request = new BatchRequest(maxBatch, Long.MAX_VALUE,
             policy.getMaxWaitTime().toNanos(), INVISIBLE_DURATION);
@@ -423,8 +432,8 @@ public class BatchFetchWorkerTest extends TestBase {
         worker = createAndStartWorker();
 
         // Return 4 messages; first batch takes 2, overflow gets 2.
-        when(delegate.receive(anyInt(), any(Duration.class)))
-            .thenReturn(fakeMessages(4, bodySize));
+        when(delegate.receiveAsync(anyString(), anyInt(), any(Duration.class)))
+            .thenReturn(CompletableFuture.completedFuture(fakeMessages(4, bodySize)));
 
         // First request
         BatchRequest req1 = new BatchRequest(maxBatchSize, maxBatchBytes,
@@ -451,11 +460,8 @@ public class BatchFetchWorkerTest extends TestBase {
         worker = createAndStartWorker();
 
         // Delegate blocks forever, so requests never complete.
-        when(delegate.receive(anyInt(), any(Duration.class)))
-            .thenAnswer(invocation -> {
-                Thread.sleep(60_000);
-                return Collections.emptyList();
-            });
+        when(delegate.receiveAsync(anyString(), anyInt(), any(Duration.class)))
+            .thenAnswer(invocation -> new CompletableFuture<List<MessageView>>());
 
         BatchRequest req1 = new BatchRequest(100, Long.MAX_VALUE,
             policy.getMaxWaitTime().toNanos(), INVISIBLE_DURATION);
@@ -487,15 +493,12 @@ public class BatchFetchWorkerTest extends TestBase {
 
         final int maxBatch = 2;
         // Delegate returns 5 messages; first request takes 2, 3 go to overflow.
-        when(delegate.receive(anyInt(), any(Duration.class)))
-            .thenReturn(fakeMessages(5, 10))
-            .thenAnswer(invocation -> {
-                Thread.sleep(60_000);
-                return Collections.emptyList();
-            });
+        when(delegate.receiveAsync(anyString(), anyInt(), any(Duration.class)))
+            .thenReturn(CompletableFuture.completedFuture(fakeMessages(5, 10)))
+            .thenAnswer(invocation -> new CompletableFuture<List<MessageView>>());
 
         // Mock changeInvisibleDurationAsync to return completed future.
-        when(delegate.changeInvisibleDurationAsync(any(MessageView.class), any(Duration.class)))
+        when(delegate.changeInvisibleDurationAsync(any(MessageView.class), any(Duration.class), anyBoolean()))
             .thenReturn(CompletableFuture.completedFuture(null));
 
         BatchRequest req = new BatchRequest(maxBatch, Long.MAX_VALUE,
@@ -510,6 +513,16 @@ public class BatchFetchWorkerTest extends TestBase {
 
         // Verify that changeInvisibleDurationAsync was called for the evicted messages.
         verify(delegate, atLeastOnce())
-            .changeInvisibleDurationAsync(any(MessageView.class), any(Duration.class));
+            .changeInvisibleDurationAsync(any(MessageView.class), any(Duration.class), anyBoolean());
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    private static <T> CompletableFuture<T> failedFuture(Throwable t) {
+        CompletableFuture<T> f = new CompletableFuture<>();
+        f.completeExceptionally(t);
+        return f;
     }
 }

@@ -20,7 +20,9 @@ package org.apache.rocketmq.client.java.impl.consumer;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -28,7 +30,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-import org.apache.rocketmq.client.apis.ClientException;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.rocketmq.client.apis.consumer.SimpleConsumer;
 import org.apache.rocketmq.client.apis.message.MessageView;
 import org.slf4j.Logger;
@@ -203,79 +205,60 @@ final class BatchFetchWorker {
     /**
      * Fills a single batch request.  First drains overflow, then fetches from the server in a
      * loop until the batch is full or times out.
+     *
+     * <p>Phase 2 fires async receives for <strong>all subscribed topics concurrently</strong>.
+     * Each topic's callback directly processes messages into the request as soon as it arrives,
+     * so a slow topic never blocks the processing of faster ones.
      */
     @SuppressWarnings("NullableProblems")
     private void fillBatch(BatchRequest request) {
-        ScheduledFuture<?> timeoutTask = null;
+        final AtomicReference<ScheduledFuture<?>> timeoutTaskRef = new AtomicReference<>();
         try {
             // --- Phase 1: drain overflow ---
-            timeoutTask = drainOverflowInto(request);
+            timeoutTaskRef.set(drainOverflowInto(request));
             if (request.future.isDone()) {
                 return;
             }
 
-            // --- Phase 2: fetch from server ---
+            // --- Phase 2: concurrent fetch from server, results processed in-place ---
             while (!closed && !request.future.isDone()) {
-                List<MessageView> received;
-                try {
-                    // Compensate invisible duration by the request's max wait time so that
-                    // messages remain invisible long enough to cover the accumulation window.
-                    // For non-batch requests (maxWaitNanos=0), no compensation is added.
-                    Duration effectiveInvisible = request.invisibleDuration
-                        .plus(Duration.ofNanos(request.maxWaitNanos));
-                    received = delegate.receive(FETCH_BATCH_SIZE, effectiveInvisible);
-                } catch (ClientException e) {
-                    if (closed || Thread.currentThread().isInterrupted()) {
-                        break;
-                    }
-                    log.warn("Background fetch failed, will retry", e);
-                    try {
-                        Thread.sleep(1000);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
-                    continue;
+                final Duration effectiveInvisible = request.invisibleDuration
+                    .plus(Duration.ofNanos(request.maxWaitNanos));
+                final Set<String> topics = delegate.getSubscriptionExpressions().keySet();
+                if (topics.isEmpty()) {
+                    break;
                 }
 
-                request.lock.lock();
+                final List<CompletableFuture<Void>> futures = new ArrayList<>(topics.size());
+                for (String topic : topics) {
+                    CompletableFuture<Void> f = delegate
+                        .receiveAsync(topic, FETCH_BATCH_SIZE, effectiveInvisible)
+                        .thenAccept(received -> {
+                            if (received == null || received.isEmpty()) {
+                                return;
+                            }
+                            processReceivedMessages(request, received, timeoutTaskRef);
+                        })
+                        .exceptionally(e -> {
+                            log.warn("Fetch failed for topic {}, skipping", topic, e);
+                            return null;
+                        });
+                    futures.add(f);
+                }
+
                 try {
-                    if (request.future.isDone()) {
-                        // Timeout fired while we were in receive().
-                        addAllToOverflow(received);
-                        break;
-                    }
-                    for (int i = 0; i < received.size(); i++) {
-                        final MessageView msg = received.get(i);
-                        request.messages.add(msg);
-                        request.currentBytes += msg.getBody().remaining();
-
-                        // First message: start the deadline clock.
-                        if (request.messages.size() == 1 && timeoutTask == null) {
-                            request.deadlineNanos = System.nanoTime() + request.maxWaitNanos;
-                            timeoutTask = scheduleTimeout(request);
-                        }
-
-                        // Batch full (count or bytes): complete immediately.
-                        if (request.isFull()) {
-                            if (timeoutTask != null) {
-                                timeoutTask.cancel(false);
-                            }
-                            request.future.complete(new ArrayList<>(request.messages));
-                            // Overflow any remaining messages.
-                            for (int j = i + 1; j < received.size(); j++) {
-                                addToOverflow(received.get(j));
-                            }
-                            return;
-                        }
-                    }
-                } finally {
-                    request.lock.unlock();
+                    CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                } catch (java.util.concurrent.ExecutionException e) {
+                    log.warn("Unexpected error during concurrent fetch", e);
                 }
             }
         } finally {
-            if (timeoutTask != null) {
-                timeoutTask.cancel(false);
+            ScheduledFuture<?> tf = timeoutTaskRef.get();
+            if (tf != null) {
+                tf.cancel(false);
             }
             // If still incomplete (shutdown / interrupt), move messages to overflow for cleanup.
             request.lock.lock();
@@ -288,6 +271,49 @@ final class BatchFetchWorker {
             } finally {
                 request.lock.unlock();
             }
+        }
+    }
+
+    /**
+     * Processes a batch of received messages directly into the request.  Called from async
+     * callbacks, so multiple invocations may run concurrently — all access is guarded by
+     * {@code request.lock}.
+     */
+    private void processReceivedMessages(BatchRequest request, List<MessageView> received,
+        AtomicReference<ScheduledFuture<?>> timeoutTaskRef) {
+        request.lock.lock();
+        try {
+            if (request.future.isDone()) {
+                addAllToOverflow(received);
+                return;
+            }
+            for (int i = 0; i < received.size(); i++) {
+                final MessageView msg = received.get(i);
+                request.messages.add(msg);
+                request.currentBytes += msg.getBody().remaining();
+
+                // First message: start the deadline clock.
+                if (request.messages.size() == 1 && timeoutTaskRef.get() == null) {
+                    request.deadlineNanos = System.nanoTime() + request.maxWaitNanos;
+                    timeoutTaskRef.set(scheduleTimeout(request));
+                }
+
+                // Batch full (count or bytes): complete immediately.
+                if (request.isFull()) {
+                    ScheduledFuture<?> tf = timeoutTaskRef.get();
+                    if (tf != null) {
+                        tf.cancel(false);
+                    }
+                    request.future.complete(new ArrayList<>(request.messages));
+                    // Overflow any remaining messages from this receive.
+                    for (int j = i + 1; j < received.size(); j++) {
+                        addToOverflow(received.get(j));
+                    }
+                    return;
+                }
+            }
+        } finally {
+            request.lock.unlock();
         }
     }
 
@@ -366,7 +392,7 @@ final class BatchFetchWorker {
             try {
                 log.info("Evicted cached message due to inactivity, messageId={}, cachedAt={}",
                     evicted.message.getMessageId(), evicted.cachedAtMillis);
-                delegate.changeInvisibleDurationAsync(evicted.message, RELEASE_INVISIBLE_DURATION)
+                delegate.changeInvisibleDurationAsync(evicted.message, RELEASE_INVISIBLE_DURATION, true)
                     .whenComplete((v, t) -> {
                         if (t != null) {
                             log.warn("Failed to release evicted message, messageId={}",
@@ -381,6 +407,37 @@ final class BatchFetchWorker {
                     evicted.message.getMessageId(), t);
             }
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Topic eviction
+    // -------------------------------------------------------------------------
+
+    /**
+     * Removes all cached messages belonging to the specified topic from the overflow buffer and
+     * releases them back to the server with {@code suspend=true}.
+     *
+     * <p>Called when a topic is unsubscribed so that stale messages do not linger in cache.
+     */
+    void evictTopic(String topic) {
+        overflowBuffer.removeIf(cached -> {
+            if (topic.equals(cached.message.getTopic())) {
+                try {
+                    delegate.changeInvisibleDurationAsync(cached.message, RELEASE_INVISIBLE_DURATION, true)
+                        .whenComplete((v, t) -> {
+                            if (t != null) {
+                                log.warn("Failed to release message on topic eviction, messageId={}",
+                                    cached.message.getMessageId(), t);
+                            }
+                        });
+                } catch (Throwable t) {
+                    log.warn("Failed to release message on topic eviction, messageId={}",
+                        cached.message.getMessageId(), t);
+                }
+                return true;
+            }
+            return false;
+        });
     }
 
     // -------------------------------------------------------------------------
