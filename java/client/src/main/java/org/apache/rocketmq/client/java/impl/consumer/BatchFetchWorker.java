@@ -140,7 +140,7 @@ final class BatchFetchWorker {
 
         fetchExecutor.shutdownNow();
         try {
-            fetchExecutor.awaitTermination(5, TimeUnit.SECONDS);
+            fetchExecutor.awaitTermination(20, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
