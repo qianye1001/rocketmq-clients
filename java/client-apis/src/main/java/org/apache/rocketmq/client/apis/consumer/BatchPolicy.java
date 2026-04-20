@@ -58,23 +58,33 @@ public class BatchPolicy {
      */
     public static final Duration DEFAULT_MAX_WAIT_TIME = Duration.ofSeconds(5);
 
+    /**
+     * Default time that cached messages may remain idle in the overflow buffer before being
+     * released back to the server.  If no request consumes them within this window, their
+     * invisible duration is shortened so they become visible to other consumers.
+     */
+    public static final Duration DEFAULT_CACHE_EVICTION_TIME = Duration.ofMinutes(5);
+
     private final int maxBatchSize;
     private final long maxBatchBytes;
     private final Duration maxWaitTime;
+    private final Duration cacheEvictionTime;
 
     /**
      * Creates a {@link BatchPolicy} with the specified message count and wait time,
-     * using the {@link #DEFAULT_MAX_BATCH_BYTES default byte limit}.
+     * using the {@link #DEFAULT_MAX_BATCH_BYTES default byte limit} and
+     * {@link #DEFAULT_CACHE_EVICTION_TIME default eviction time}.
      *
      * @param maxBatchSize the maximum number of messages in a batch; must be &gt; 0.
      * @param maxWaitTime  the maximum time to wait for the batch to fill up; must be positive.
      */
     public BatchPolicy(int maxBatchSize, Duration maxWaitTime) {
-        this(maxBatchSize, DEFAULT_MAX_BATCH_BYTES, maxWaitTime);
+        this(maxBatchSize, DEFAULT_MAX_BATCH_BYTES, maxWaitTime, DEFAULT_CACHE_EVICTION_TIME);
     }
 
     /**
-     * Creates a {@link BatchPolicy} with the specified parameters.
+     * Creates a {@link BatchPolicy} with the specified parameters and
+     * {@link #DEFAULT_CACHE_EVICTION_TIME default eviction time}.
      *
      * @param maxBatchSize  the maximum number of messages in a batch; must be &gt; 0.
      * @param maxBatchBytes the maximum total body size (in bytes) of messages in a batch; must be &gt; 0.
@@ -82,14 +92,32 @@ public class BatchPolicy {
      * @param maxWaitTime   the maximum time to wait for the batch to fill up; must be positive.
      */
     public BatchPolicy(int maxBatchSize, long maxBatchBytes, Duration maxWaitTime) {
+        this(maxBatchSize, maxBatchBytes, maxWaitTime, DEFAULT_CACHE_EVICTION_TIME);
+    }
+
+    /**
+     * Creates a {@link BatchPolicy} with all parameters specified.
+     *
+     * @param maxBatchSize      the maximum number of messages in a batch; must be &gt; 0.
+     * @param maxBatchBytes     the maximum total body size (in bytes) of messages in a batch; must be &gt; 0.
+     * @param maxWaitTime       the maximum time to wait for the batch to fill up; must be positive.
+     * @param cacheEvictionTime the maximum time that cached messages may remain idle in the
+     *                          overflow buffer before being released back to the server; must be positive.
+     */
+    public BatchPolicy(int maxBatchSize, long maxBatchBytes, Duration maxWaitTime,
+        Duration cacheEvictionTime) {
         checkArgument(maxBatchSize > 0, "maxBatchSize must be greater than 0");
         checkArgument(maxBatchBytes > 0, "maxBatchBytes must be greater than 0");
         checkNotNull(maxWaitTime, "maxWaitTime should not be null");
         checkArgument(!maxWaitTime.isNegative() && !maxWaitTime.isZero(),
             "maxWaitTime must be positive");
+        checkNotNull(cacheEvictionTime, "cacheEvictionTime should not be null");
+        checkArgument(!cacheEvictionTime.isNegative() && !cacheEvictionTime.isZero(),
+            "cacheEvictionTime must be positive");
         this.maxBatchSize = maxBatchSize;
         this.maxBatchBytes = maxBatchBytes;
         this.maxWaitTime = maxWaitTime;
+        this.cacheEvictionTime = cacheEvictionTime;
     }
 
     /**
@@ -121,10 +149,104 @@ public class BatchPolicy {
         return maxWaitTime;
     }
 
+    /**
+     * Returns the maximum time that cached messages may remain idle in the overflow buffer
+     * before being released back to the server via
+     * {@link SimpleConsumer#changeInvisibleDuration(org.apache.rocketmq.client.apis.message.MessageView, Duration)}.
+     *
+     * <p>When no {@code receive} or {@code batchReceive} call consumes the cached messages within
+     * this window, they are proactively released so that other consumers can process them.
+     *
+     * @return cache eviction time.
+     */
+    public Duration getCacheEvictionTime() {
+        return cacheEvictionTime;
+    }
+
+    /**
+     * Returns a new {@link Builder} with all defaults pre-populated.
+     */
+    public static Builder builder() {
+        return new Builder();
+    }
+
     @Override
     public String toString() {
         return "BatchPolicy{maxBatchSize=" + maxBatchSize
             + ", maxBatchBytes=" + maxBatchBytes
-            + ", maxWaitTime=" + maxWaitTime + '}';
+            + ", maxWaitTime=" + maxWaitTime
+            + ", cacheEvictionTime=" + cacheEvictionTime + '}';
+    }
+
+    /**
+     * Builder for {@link BatchPolicy}.  All fields have sensible defaults; only override
+     * what you need.
+     *
+     * <pre>{@code
+     * BatchPolicy policy = BatchPolicy.builder()
+     *     .setMaxBatchSize(64)
+     *     .setMaxWaitTime(Duration.ofSeconds(10))
+     *     .build();
+     * }</pre>
+     */
+    public static class Builder {
+        private int maxBatchSize = DEFAULT_MAX_BATCH_SIZE;
+        private long maxBatchBytes = DEFAULT_MAX_BATCH_BYTES;
+        private Duration maxWaitTime = DEFAULT_MAX_WAIT_TIME;
+        private Duration cacheEvictionTime = DEFAULT_CACHE_EVICTION_TIME;
+
+        Builder() {
+        }
+
+        /**
+         * Sets the maximum number of messages in a batch.
+         *
+         * @param maxBatchSize must be &gt; 0; default {@value DEFAULT_MAX_BATCH_SIZE}.
+         */
+        public Builder setMaxBatchSize(int maxBatchSize) {
+            this.maxBatchSize = maxBatchSize;
+            return this;
+        }
+
+        /**
+         * Sets the maximum total body size (in bytes) before a batch is returned.
+         *
+         * @param maxBatchBytes must be &gt; 0; default {@value DEFAULT_MAX_BATCH_BYTES}.
+         */
+        public Builder setMaxBatchBytes(long maxBatchBytes) {
+            this.maxBatchBytes = maxBatchBytes;
+            return this;
+        }
+
+        /**
+         * Sets the maximum time to wait for the batch to fill up.
+         *
+         * @param maxWaitTime must be positive; default 5 seconds.
+         */
+        public Builder setMaxWaitTime(Duration maxWaitTime) {
+            this.maxWaitTime = maxWaitTime;
+            return this;
+        }
+
+        /**
+         * Sets the maximum time that cached messages may remain idle in the overflow buffer
+         * before being released back to the server.
+         *
+         * @param cacheEvictionTime must be positive; default 5 minutes.
+         */
+        public Builder setCacheEvictionTime(Duration cacheEvictionTime) {
+            this.cacheEvictionTime = cacheEvictionTime;
+            return this;
+        }
+
+        /**
+         * Builds a new {@link BatchPolicy} with the configured values.
+         *
+         * @return a new {@link BatchPolicy} instance.
+         * @throws IllegalArgumentException if any parameter is invalid.
+         */
+        public BatchPolicy build() {
+            return new BatchPolicy(maxBatchSize, maxBatchBytes, maxWaitTime, cacheEvictionTime);
+        }
     }
 }

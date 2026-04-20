@@ -84,7 +84,7 @@ public class BatchingSimpleConsumer implements SimpleConsumer {
         checkNotNull(batchPolicy, "batchPolicy should not be null");
         this.delegate = delegate;
         this.batchPolicy = batchPolicy;
-        this.worker = new BatchFetchWorker(delegate);
+        this.worker = new BatchFetchWorker(delegate, batchPolicy.getCacheEvictionTime());
     }
 
     /**

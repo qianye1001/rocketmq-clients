@@ -40,11 +40,15 @@ import org.slf4j.LoggerFactory;
  *
  * <p>This worker is generic: the same fetch loop serves both <strong>batch receive</strong>
  * (accumulate until count/bytes/timeout) and <strong>cached receive</strong> (return immediately
- * from overflow or after a single fetch) — the difference is entirely determined by the
+ * from overflow or after a single fetch) \u2014 the difference is entirely determined by the
  * {@link BatchRequest} parameters ({@code maxWaitNanos = 0} means no accumulation wait).
  *
  * <p><strong>Demand-driven</strong>: the worker blocks on {@link BlockingQueue#take()} when no
  * requests are pending, producing zero server traffic.
+ *
+ * <p><strong>Cache eviction</strong>: messages that sit idle in the overflow buffer longer than
+ * {@code cacheEvictionTime} are proactively released back to the server so that other consumers
+ * can process them.
  */
 final class BatchFetchWorker {
 
@@ -55,7 +59,13 @@ final class BatchFetchWorker {
      */
     private static final int FETCH_BATCH_SIZE = 32;
 
+    /**
+     * Duration used when releasing evicted or shutdown-buffered messages.
+     */
+    private static final Duration RELEASE_INVISIBLE_DURATION = Duration.ofSeconds(1);
+
     private final SimpleConsumer delegate;
+    private final Duration cacheEvictionTime;
 
     /**
      * Single-threaded executor that runs {@link #fetchLoop()}.
@@ -77,13 +87,15 @@ final class BatchFetchWorker {
     /**
      * Overflow buffer: when a single {@code delegate.receive()} returns more messages than the
      * current batch request needs, the surplus is parked here for the next request.
+     * Each entry records the timestamp when it was cached, enabling time-based eviction.
      */
-    private final ConcurrentLinkedDeque<MessageView> overflowBuffer = new ConcurrentLinkedDeque<>();
+    private final ConcurrentLinkedDeque<CachedMessage> overflowBuffer = new ConcurrentLinkedDeque<>();
 
     private volatile boolean closed = false;
 
-    BatchFetchWorker(SimpleConsumer delegate) {
+    BatchFetchWorker(SimpleConsumer delegate, Duration cacheEvictionTime) {
         this.delegate = delegate;
+        this.cacheEvictionTime = cacheEvictionTime;
         this.fetchExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "BatchingSimpleConsumer-fetch");
             t.setDaemon(true);
@@ -102,6 +114,10 @@ final class BatchFetchWorker {
      */
     void start() {
         fetchExecutor.execute(this::fetchLoop);
+        // Schedule periodic cache eviction.
+        long evictionCheckMillis = Math.max(cacheEvictionTime.toMillis() / 3, 1000);
+        scheduler.scheduleAtFixedRate(this::evictExpiredCache,
+            evictionCheckMillis, evictionCheckMillis, TimeUnit.MILLISECONDS);
     }
 
     /** Enqueues a batch request.  Thread-safe. */
@@ -134,7 +150,7 @@ final class BatchFetchWorker {
             pending.lock.lock();
             try {
                 if (!pending.future.isDone()) {
-                    overflowBuffer.addAll(pending.messages);
+                    addAllToOverflow(pending.messages);
                     pending.messages.clear();
                     pending.future.cancel(true);
                 }
@@ -145,9 +161,9 @@ final class BatchFetchWorker {
 
         // Drain overflow buffer.
         final List<MessageView> remaining = new ArrayList<>();
-        MessageView msg;
-        while ((msg = overflowBuffer.poll()) != null) {
-            remaining.add(msg);
+        CachedMessage cached;
+        while ((cached = overflowBuffer.poll()) != null) {
+            remaining.add(cached.message);
         }
         return remaining;
     }
@@ -172,7 +188,7 @@ final class BatchFetchWorker {
                 request.lock.lock();
                 try {
                     if (!request.future.isDone()) {
-                        overflowBuffer.addAll(request.messages);
+                        addAllToOverflow(request.messages);
                         request.messages.clear();
                         request.future.completeExceptionally(t);
                     }
@@ -226,7 +242,7 @@ final class BatchFetchWorker {
                 try {
                     if (request.future.isDone()) {
                         // Timeout fired while we were in receive().
-                        overflowBuffer.addAll(received);
+                        addAllToOverflow(received);
                         break;
                     }
                     for (int i = 0; i < received.size(); i++) {
@@ -248,7 +264,7 @@ final class BatchFetchWorker {
                             request.future.complete(new ArrayList<>(request.messages));
                             // Overflow any remaining messages.
                             for (int j = i + 1; j < received.size(); j++) {
-                                overflowBuffer.addLast(received.get(j));
+                                addToOverflow(received.get(j));
                             }
                             return;
                         }
@@ -265,7 +281,7 @@ final class BatchFetchWorker {
             request.lock.lock();
             try {
                 if (!request.future.isDone()) {
-                    overflowBuffer.addAll(request.messages);
+                    addAllToOverflow(request.messages);
                     request.messages.clear();
                     request.future.cancel(true);
                 }
@@ -283,10 +299,10 @@ final class BatchFetchWorker {
     private ScheduledFuture<?> drainOverflowInto(BatchRequest request) {
         request.lock.lock();
         try {
-            MessageView msg;
-            while ((msg = overflowBuffer.poll()) != null) {
-                request.messages.add(msg);
-                request.currentBytes += msg.getBody().remaining();
+            CachedMessage cached;
+            while ((cached = overflowBuffer.poll()) != null) {
+                request.messages.add(cached.message);
+                request.currentBytes += cached.message.getBody().remaining();
                 if (request.messages.size() == 1) {
                     request.deadlineNanos = System.nanoTime() + request.maxWaitNanos;
                 }
@@ -321,5 +337,80 @@ final class BatchFetchWorker {
                 request.lock.unlock();
             }
         }, Math.max(0, delayNanos), TimeUnit.NANOSECONDS);
+    }
+
+    // -------------------------------------------------------------------------
+    // Cache eviction
+    // -------------------------------------------------------------------------
+
+    /**
+     * Evicts messages from the overflow buffer that have been idle longer than
+     * {@code cacheEvictionTime}.  Since messages are appended in chronological order,
+     * we only need to scan from the head until we find a non-expired entry.
+     */
+    private void evictExpiredCache() {
+        if (closed) {
+            return;
+        }
+        final long now = System.currentTimeMillis();
+        final long evictionMillis = cacheEvictionTime.toMillis();
+        CachedMessage head;
+        while ((head = overflowBuffer.peekFirst()) != null) {
+            if (now - head.cachedAtMillis < evictionMillis) {
+                break;
+            }
+            CachedMessage evicted = overflowBuffer.pollFirst();
+            if (evicted == null) {
+                break;
+            }
+            try {
+                log.info("Evicted cached message due to inactivity, messageId={}, cachedAt={}",
+                    evicted.message.getMessageId(), evicted.cachedAtMillis);
+                delegate.changeInvisibleDurationAsync(evicted.message, RELEASE_INVISIBLE_DURATION)
+                    .whenComplete((v, t) -> {
+                        if (t != null) {
+                            log.warn("Failed to release evicted message, messageId={}",
+                                evicted.message.getMessageId(), t);
+                        } else {
+                            log.info("Released evicted message successfully, messageId={}",
+                                evicted.message.getMessageId());
+                        }
+                });
+            } catch (Throwable t) {
+                log.warn("Failed to release evicted message, messageId={}",
+                    evicted.message.getMessageId(), t);
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Overflow helpers
+    // -------------------------------------------------------------------------
+
+    private void addToOverflow(MessageView message) {
+        overflowBuffer.addLast(new CachedMessage(message));
+    }
+
+    private void addAllToOverflow(List<MessageView> messages) {
+        for (MessageView msg : messages) {
+            overflowBuffer.addLast(new CachedMessage(msg));
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Inner class
+    // -------------------------------------------------------------------------
+
+    /**
+     * Wraps a {@link MessageView} with the timestamp when it was placed into the overflow buffer.
+     */
+    static class CachedMessage {
+        final MessageView message;
+        final long cachedAtMillis;
+
+        CachedMessage(MessageView message) {
+            this.message = message;
+            this.cachedAtMillis = System.currentTimeMillis();
+        }
     }
 }

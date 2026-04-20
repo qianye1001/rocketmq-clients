@@ -94,7 +94,11 @@ public class BatchSimpleConsumerExample {
         // IMPORTANT: the server-side invisible duration = invisibleDuration + maxWaitTime.
         // The extra maxWaitTime covers the batching window so that messages do not become
         // visible to other consumers while still being aggregated locally.
-        BatchPolicy batchPolicy = new BatchPolicy(512, 4L * 1024 * 1024, Duration.ofSeconds(5));
+        BatchPolicy batchPolicy = BatchPolicy.builder()
+            .setMaxBatchSize(512)
+            .setMaxBatchBytes(4L * 1024 * 1024)
+            .setMaxWaitTime(Duration.ofSeconds(5))
+            .build();
 
         SimpleConsumer consumer = provider.newSimpleConsumerBuilder()
             .setClientConfiguration(clientConfiguration)

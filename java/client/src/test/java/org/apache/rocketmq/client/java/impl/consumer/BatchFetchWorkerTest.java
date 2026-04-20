@@ -21,6 +21,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.time.Duration;
@@ -46,6 +48,7 @@ import org.mockito.stubbing.Answer;
 public class BatchFetchWorkerTest extends TestBase {
 
     private static final Duration INVISIBLE_DURATION = Duration.ofSeconds(10);
+    private static final Duration DEFAULT_EVICTION = Duration.ofMinutes(5);
 
     @Mock
     private SimpleConsumer delegate;
@@ -61,7 +64,11 @@ public class BatchFetchWorkerTest extends TestBase {
     }
 
     private BatchFetchWorker createAndStartWorker() {
-        BatchFetchWorker w = new BatchFetchWorker(delegate);
+        return createAndStartWorker(DEFAULT_EVICTION);
+    }
+
+    private BatchFetchWorker createAndStartWorker(Duration cacheEvictionTime) {
+        BatchFetchWorker w = new BatchFetchWorker(delegate, cacheEvictionTime);
         w.start();
         return w;
     }
@@ -466,5 +473,43 @@ public class BatchFetchWorkerTest extends TestBase {
         // Both should be done (cancelled).
         assertTrue(req1.future.isDone());
         assertTrue(req2.future.isDone());
+    }
+
+    // -----------------------------------------------------------------------
+    // 15. Cache eviction: idle overflow messages are released
+    // -----------------------------------------------------------------------
+
+    @Test
+    public void testCacheEvictionReleasesIdleMessages() throws Exception {
+        // Use a very short eviction time for testing.
+        final Duration evictionTime = Duration.ofMillis(200);
+        worker = createAndStartWorker(evictionTime);
+
+        final int maxBatch = 2;
+        // Delegate returns 5 messages; first request takes 2, 3 go to overflow.
+        when(delegate.receive(anyInt(), any(Duration.class)))
+            .thenReturn(fakeMessages(5, 10))
+            .thenAnswer(invocation -> {
+                Thread.sleep(60_000);
+                return Collections.emptyList();
+            });
+
+        // Mock changeInvisibleDurationAsync to return completed future.
+        when(delegate.changeInvisibleDurationAsync(any(MessageView.class), any(Duration.class)))
+            .thenReturn(CompletableFuture.completedFuture(null));
+
+        BatchRequest req = new BatchRequest(maxBatch, Long.MAX_VALUE,
+            Duration.ofSeconds(5).toNanos(), INVISIBLE_DURATION);
+        worker.submit(req);
+        req.future.get(5, TimeUnit.SECONDS);
+
+        // Wait for eviction to fire (eviction check interval = max(200/3, 1000) = 1000ms).
+        // But with 200ms eviction time and check interval max(66, 1000) = 1000ms,
+        // we need to wait a bit longer for the scheduled task to run.
+        Thread.sleep(1500);
+
+        // Verify that changeInvisibleDurationAsync was called for the evicted messages.
+        verify(delegate, atLeastOnce())
+            .changeInvisibleDurationAsync(any(MessageView.class), any(Duration.class));
     }
 }
