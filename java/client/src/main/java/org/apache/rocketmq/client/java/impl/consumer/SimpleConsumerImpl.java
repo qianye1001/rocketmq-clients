@@ -268,7 +268,17 @@ class SimpleConsumerImpl extends ConsumerImpl implements SimpleConsumer {
      */
     @Override
     public void changeInvisibleDuration(MessageView messageView, Duration invisibleDuration) throws ClientException {
-        final ListenableFuture<Void> future = changeInvisibleDuration0(messageView, invisibleDuration);
+        final ListenableFuture<Void> future = changeInvisibleDuration0(messageView, invisibleDuration, false);
+        handleClientFuture(future);
+    }
+
+    /**
+     * @see SimpleConsumer#changeInvisibleDuration(MessageView, Duration, boolean)
+     */
+    @Override
+    public void changeInvisibleDuration(MessageView messageView, Duration invisibleDuration, boolean suspend)
+        throws ClientException {
+        final ListenableFuture<Void> future = changeInvisibleDuration0(messageView, invisibleDuration, suspend);
         handleClientFuture(future);
     }
 
@@ -277,11 +287,22 @@ class SimpleConsumerImpl extends ConsumerImpl implements SimpleConsumer {
      */
     @Override
     public CompletableFuture<Void> changeInvisibleDurationAsync(MessageView messageView, Duration invisibleDuration) {
-        final ListenableFuture<Void> future = changeInvisibleDuration0(messageView, invisibleDuration);
+        final ListenableFuture<Void> future = changeInvisibleDuration0(messageView, invisibleDuration, false);
         return FutureConverter.toCompletableFuture(future);
     }
 
-    public ListenableFuture<Void> changeInvisibleDuration0(MessageView messageView, Duration invisibleDuration) {
+    /**
+     * @see SimpleConsumer#changeInvisibleDurationAsync(MessageView, Duration, boolean)
+     */
+    @Override
+    public CompletableFuture<Void> changeInvisibleDurationAsync(MessageView messageView, Duration invisibleDuration,
+        boolean suspend) {
+        final ListenableFuture<Void> future = changeInvisibleDuration0(messageView, invisibleDuration, suspend);
+        return FutureConverter.toCompletableFuture(future);
+    }
+
+    public ListenableFuture<Void> changeInvisibleDuration0(MessageView messageView, Duration invisibleDuration,
+        boolean suspend) {
         // Check consumer status.
         if (!this.isRunning()) {
             log.error("Unable to change invisible duration because {} is not running, state={}, clientId={}",
@@ -296,7 +317,7 @@ class SimpleConsumerImpl extends ConsumerImpl implements SimpleConsumer {
         }
         MessageViewImpl impl = (MessageViewImpl) messageView;
         final RpcFuture<ChangeInvisibleDurationRequest, ChangeInvisibleDurationResponse> future =
-            changeInvisibleDuration(impl, invisibleDuration);
+            changeInvisibleDuration(impl, invisibleDuration, suspend);
         return Futures.transformAsync(future, response -> {
             // Refresh receipt handle manually.
             impl.setReceiptHandle(response.getReceiptHandle());

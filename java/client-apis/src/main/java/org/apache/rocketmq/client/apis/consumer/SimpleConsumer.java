@@ -182,6 +182,21 @@ public interface SimpleConsumer extends Closeable {
     void changeInvisibleDuration(MessageView messageView, Duration invisibleDuration) throws ClientException;
 
     /**
+     * Changes the invisible duration of a specified message synchronously, with an option to
+     * suspend retry-count increment on the server.
+     *
+     * <p>When {@code suspend} is {@code true}, the server will <em>not</em> increment the
+     * delivery attempt counter for this message.  This is useful for messages that are released
+     * back to the server due to client-side cache eviction rather than a genuine processing failure.
+     *
+     * @param messageView       the message view to change invisible time.
+     * @param invisibleDuration new timestamp the message could be visible and re-consume which start from current time.
+     * @param suspend           if {@code true}, the server will not increment the retry times.
+     */
+    void changeInvisibleDuration(MessageView messageView, Duration invisibleDuration, boolean suspend)
+        throws ClientException;
+
+    /**
      * Changes the invisible duration of a specified message asynchronously.
      *
      * <p> The origin invisible duration for a message decide by ack request.
@@ -193,6 +208,17 @@ public interface SimpleConsumer extends Closeable {
      * @return CompletableFuture of this request.
      */
     CompletableFuture<Void> changeInvisibleDurationAsync(MessageView messageView, Duration invisibleDuration);
+
+    /**
+     * Asynchronous variant of {@link #changeInvisibleDuration(MessageView, Duration, boolean)}.
+     *
+     * @param messageView       the message view to change invisible time.
+     * @param invisibleDuration new timestamp the message could be visible and re-consume which start from current time.
+     * @param suspend           if {@code true}, the server will not increment the retry times.
+     * @return CompletableFuture of this request.
+     */
+    CompletableFuture<Void> changeInvisibleDurationAsync(MessageView messageView, Duration invisibleDuration,
+        boolean suspend);
 
     /**
      * Batch-fetch messages from the local cache synchronously.

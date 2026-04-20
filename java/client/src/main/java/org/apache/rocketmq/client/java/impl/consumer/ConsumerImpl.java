@@ -152,6 +152,11 @@ public abstract class ConsumerImpl extends ClientImpl {
 
     protected ChangeInvisibleDurationRequest wrapChangeInvisibleDuration(MessageViewImpl messageView,
         Duration invisibleDuration) {
+        return wrapChangeInvisibleDuration(messageView, invisibleDuration, false);
+    }
+
+    protected ChangeInvisibleDurationRequest wrapChangeInvisibleDuration(MessageViewImpl messageView,
+        Duration invisibleDuration, boolean suspend) {
         final apache.rocketmq.v2.Resource topicResource = apache.rocketmq.v2.Resource.newBuilder()
             .setResourceNamespace(clientConfiguration.getNamespace())
             .setName(messageView.getTopic()).build();
@@ -161,6 +166,9 @@ public abstract class ConsumerImpl extends ClientImpl {
             .setReceiptHandle(messageView.getReceiptHandle())
             .setInvisibleDuration(Durations.fromNanos(invisibleDuration.toNanos()))
             .setMessageId(messageView.getMessageId().toString());
+        if (suspend) {
+            builder.setSuspend(true);
+        }
         if (isLiteConsumer()) {
             if (messageView.getLiteTopic().isPresent()) {
                 builder.setLiteTopic(messageView.getLiteTopic().get());
@@ -290,13 +298,19 @@ public abstract class ConsumerImpl extends ClientImpl {
 
     RpcFuture<ChangeInvisibleDurationRequest, ChangeInvisibleDurationResponse> changeInvisibleDuration(
         MessageViewImpl messageView, Duration invisibleDuration) {
+        return changeInvisibleDuration(messageView, invisibleDuration, false);
+    }
+
+    RpcFuture<ChangeInvisibleDurationRequest, ChangeInvisibleDurationResponse> changeInvisibleDuration(
+        MessageViewImpl messageView, Duration invisibleDuration, boolean suspend) {
         final Endpoints endpoints = messageView.getEndpoints();
         RpcFuture<ChangeInvisibleDurationRequest, ChangeInvisibleDurationResponse> future;
         final List<GeneralMessage> generalMessages = Collections.singletonList(new GeneralMessageImpl(messageView));
         final MessageInterceptorContextImpl context =
             new MessageInterceptorContextImpl(MessageHookPoints.CHANGE_INVISIBLE_DURATION);
         doBefore(context, generalMessages);
-        final ChangeInvisibleDurationRequest request = wrapChangeInvisibleDuration(messageView, invisibleDuration);
+        final ChangeInvisibleDurationRequest request =
+            wrapChangeInvisibleDuration(messageView, invisibleDuration, suspend);
         final Duration requestTimeout = clientConfiguration.getRequestTimeout();
         future = this.getClientManager().changeInvisibleDuration(endpoints, request, requestTimeout);
         final MessageId messageId = messageView.getMessageId();
