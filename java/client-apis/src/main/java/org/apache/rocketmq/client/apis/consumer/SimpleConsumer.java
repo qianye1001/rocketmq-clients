@@ -110,6 +110,21 @@ public interface SimpleConsumer extends Closeable {
     List<MessageView> receive(int maxMessageNum, Duration invisibleDuration) throws ClientException;
 
     /**
+     * Fetch messages from a <strong>specific topic</strong> synchronously.
+     *
+     * <p>Unlike {@link #receive(int, Duration)} which round-robins across all subscribed topics (and may
+     * be blocked by a topic with no messages), this method targets a single topic so that the caller
+     * has full control over which topic to poll.
+     *
+     * @param topic             the topic to receive messages from; must be subscribed.
+     * @param maxMessageNum     max message num of server returned.
+     * @param invisibleDuration set the invisibleDuration of messages to return from the server.
+     * @return list of message view.
+     * @throws IllegalArgumentException if the topic is not subscribed.
+     */
+    List<MessageView> receive(String topic, int maxMessageNum, Duration invisibleDuration) throws ClientException;
+
+    /**
      * Fetch messages from the server asynchronously.
      * <p> This method returns immediately if there are messages available.
      * Otherwise, it will await the passed timeout. If the timeout expires, an empty map will be returned.
@@ -120,6 +135,20 @@ public interface SimpleConsumer extends Closeable {
      * @return list of message view.
      */
     CompletableFuture<List<MessageView>> receiveAsync(int maxMessageNum, Duration invisibleDuration);
+
+    /**
+     * Fetch messages from a <strong>specific topic</strong> asynchronously.
+     *
+     * <p>Same semantics as {@link #receive(String, int, Duration)} but returns a
+     * {@link CompletableFuture} immediately.
+     *
+     * @param topic             the topic to receive messages from; must be subscribed.
+     * @param maxMessageNum     max message num of server returned.
+     * @param invisibleDuration set the invisibleDuration of messages to return from the server.
+     * @return list of message view.
+     * @throws IllegalArgumentException if the topic is not subscribed.
+     */
+    CompletableFuture<List<MessageView>> receiveAsync(String topic, int maxMessageNum, Duration invisibleDuration);
 
     /**
      * Ack message to server synchronously, server commit this message.
