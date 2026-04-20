@@ -264,6 +264,42 @@ class SimpleConsumerImpl extends ConsumerImpl implements SimpleConsumer {
         this.stopAsync().awaitTerminated();
     }
 
+    /**
+     * @see SimpleConsumer#batchAck(List)
+     */
+    @Override
+    public void batchAck(List<MessageView> messageViews) throws ClientException {
+        final ListenableFuture<Void> future = batchAck0(messageViews);
+        handleClientFuture(future);
+    }
+
+    /**
+     * @see SimpleConsumer#batchAckAsync(List)
+     */
+    @Override
+    public CompletableFuture<Void> batchAckAsync(List<MessageView> messageViews) {
+        final ListenableFuture<Void> future = batchAck0(messageViews);
+        return FutureConverter.toCompletableFuture(future);
+    }
+
+    private ListenableFuture<Void> batchAck0(List<MessageView> messageViews) {
+        if (!this.isRunning()) {
+            log.error("Unable to batch ack because {} is not running, state={}, clientId={}",
+                clientType(), this.state(), clientId);
+            return Futures.immediateFailedFuture(
+                new IllegalStateException("Simple consumer is not running now"));
+        }
+        final List<MessageViewImpl> impls = new ArrayList<>(messageViews.size());
+        for (MessageView mv : messageViews) {
+            if (!(mv instanceof MessageViewImpl)) {
+                return Futures.immediateFailedFuture(
+                    new IllegalArgumentException("Failed downcasting for messageView"));
+            }
+            impls.add((MessageViewImpl) mv);
+        }
+        return batchAckMessages(impls);
+    }
+
     @Override
     public Settings getSettings() {
         return simpleSubscriptionSettings;

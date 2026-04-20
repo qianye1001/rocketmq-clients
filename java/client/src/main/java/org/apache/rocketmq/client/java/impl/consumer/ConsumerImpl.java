@@ -40,7 +40,9 @@ import com.google.protobuf.util.Timestamps;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -158,6 +160,86 @@ public abstract class ConsumerImpl extends ClientImpl {
             }
         }
         return builder.build();
+    }
+
+    /**
+     * Acknowledges a batch of messages in a single RPC per (topic, endpoints) group.
+     *
+     * <p>Messages are grouped by their target endpoints and topic, then a single
+     * {@link AckMessageRequest} with multiple {@link AckMessageEntry} entries is sent for each
+     * group.  This avoids the overhead of one RPC per message.
+     *
+     * @param messageViews the messages to acknowledge; all elements must be {@link MessageViewImpl}.
+     * @return a future that completes when <em>all</em> underlying RPCs have completed.
+     */
+    protected ListenableFuture<Void> batchAckMessages(List<MessageViewImpl> messageViews) {
+        // Group messages by (endpoints, topic) so that each RPC covers one broker + topic.
+        final Map<Endpoints, Map<String /* topic */, List<MessageViewImpl>>> grouped = new HashMap<>();
+        for (MessageViewImpl mv : messageViews) {
+            grouped.computeIfAbsent(mv.getEndpoints(), k -> new HashMap<>())
+                .computeIfAbsent(mv.getTopic(), k -> new ArrayList<>())
+                .add(mv);
+        }
+
+        final List<ListenableFuture<Void>> futures = new ArrayList<>();
+        for (Map.Entry<Endpoints, Map<String, List<MessageViewImpl>>> endpointsEntry : grouped.entrySet()) {
+            final Endpoints endpoints = endpointsEntry.getKey();
+            for (Map.Entry<String, List<MessageViewImpl>> topicEntry : endpointsEntry.getValue().entrySet()) {
+                final List<MessageViewImpl> batch = topicEntry.getValue();
+                futures.add(doBatchAck(endpoints, batch));
+            }
+        }
+        return Futures.whenAllComplete(futures).call(() -> {
+            // Propagate the first failure if any.
+            for (ListenableFuture<Void> f : futures) {
+                f.get(); // throws ExecutionException on failure
+            }
+            return null;
+        }, MoreExecutors.directExecutor());
+    }
+
+    private ListenableFuture<Void> doBatchAck(Endpoints endpoints, List<MessageViewImpl> batch) {
+        final List<GeneralMessage> generalMessages = new ArrayList<>(batch.size());
+        for (MessageViewImpl mv : batch) {
+            generalMessages.add(new GeneralMessageImpl(mv));
+        }
+        final MessageInterceptorContextImpl context = new MessageInterceptorContextImpl(MessageHookPoints.ACK);
+        doBefore(context, generalMessages);
+
+        final AckMessageRequest.Builder requestBuilder = AckMessageRequest.newBuilder()
+            .setGroup(getProtobufGroup())
+            .setTopic(apache.rocketmq.v2.Resource.newBuilder()
+                .setResourceNamespace(clientConfiguration.getNamespace())
+                .setName(batch.get(0).getTopic())
+                .build());
+        for (MessageViewImpl mv : batch) {
+            final AckMessageEntry.Builder entryBuilder = AckMessageEntry.newBuilder()
+                .setMessageId(mv.getMessageId().toString())
+                .setReceiptHandle(mv.getReceiptHandle());
+            if (isLiteConsumer()) {
+                mv.getLiteTopic().ifPresent(entryBuilder::setLiteTopic);
+            }
+            requestBuilder.addEntries(entryBuilder.build());
+        }
+
+        final RpcFuture<AckMessageRequest, AckMessageResponse> future;
+        try {
+            final Duration requestTimeout = clientConfiguration.getRequestTimeout();
+            future = this.getClientManager().ackMessage(endpoints, requestBuilder.build(), requestTimeout);
+        } catch (Throwable t) {
+            return Futures.immediateFailedFuture(t);
+        }
+        return Futures.transformAsync(future, response -> {
+            final Status status = response.getStatus();
+            final Code code = status.getCode();
+            MessageHookPointsStatus hookPointsStatus = Code.OK.equals(code)
+                ? MessageHookPointsStatus.OK : MessageHookPointsStatus.ERROR;
+            MessageInterceptorContextImpl context0 =
+                new MessageInterceptorContextImpl(context, hookPointsStatus);
+            doAfter(context0, generalMessages);
+            StatusChecker.check(status, future);
+            return Futures.immediateVoidFuture();
+        }, MoreExecutors.directExecutor());
     }
 
     protected RpcFuture<AckMessageRequest, AckMessageResponse> ackMessage(MessageViewImpl messageView) {

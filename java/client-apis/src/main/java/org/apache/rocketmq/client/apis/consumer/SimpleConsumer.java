@@ -166,6 +166,76 @@ public interface SimpleConsumer extends Closeable {
     CompletableFuture<Void> changeInvisibleDurationAsync(MessageView messageView, Duration invisibleDuration);
 
     /**
+     * Batch-fetch messages from the local cache synchronously.
+     *
+     * <p>This method blocks until either {@link BatchPolicy#getMaxBatchSize()} messages have accumulated in the
+     * internal buffer, or {@link BatchPolicy#getMaxWaitTime()} has elapsed since the first message arrived.
+     *
+     * <p>The underlying transport always uses the standard {@link #receive(int, Duration)} API; messages are fetched
+     * in the background and buffered locally.
+     *
+     * <p>A {@link BatchPolicy} must have been set via
+     * {@link SimpleConsumerBuilder#setBatchPolicy(BatchPolicy)} before calling this method; otherwise an
+     * {@link UnsupportedOperationException} is thrown.
+     *
+     * @param invisibleDuration the invisible duration assigned to each message on the server side.
+     *                          Note that the <em>effective</em> invisible window on the server is
+     *                          {@code invisibleDuration + batchPolicy.maxWaitTime}.
+     * @return a non-empty list of messages (size &le; {@link BatchPolicy#getMaxBatchSize()}).
+     * @throws ClientException          if an unrecoverable error occurs.
+     * @throws UnsupportedOperationException if no {@link BatchPolicy} has been configured.
+     */
+    default List<MessageView> batchReceive(Duration invisibleDuration) throws ClientException {
+        throw new UnsupportedOperationException("batchReceive is not supported without a BatchPolicy. "
+            + "Call SimpleConsumerBuilder#setBatchPolicy first.");
+    }
+
+    /**
+     * Batch-fetch messages from the local cache asynchronously.
+     *
+     * <p>Same semantics as {@link #batchReceive(Duration)} but returns a {@link CompletableFuture} immediately.
+     * Multiple calls are queued internally and fulfilled in FIFO order.
+     *
+     * <p>The background thread is <em>demand-driven</em>: it only calls
+     * {@link #receive(int, Duration)} when there are pending {@code batchReceiveAsync} requests.
+     * If no request is outstanding, the background thread idles and does not contact the server.
+     *
+     * @param invisibleDuration the invisible duration assigned to each message on the server side.
+     * @return a {@link CompletableFuture} that completes with a non-empty list of messages.
+     * @throws UnsupportedOperationException if no {@link BatchPolicy} has been configured.
+     */
+    default CompletableFuture<List<MessageView>> batchReceiveAsync(Duration invisibleDuration) {
+        throw new UnsupportedOperationException("batchReceiveAsync is not supported without a BatchPolicy. "
+            + "Call SimpleConsumerBuilder#setBatchPolicy first.");
+    }
+
+    /**
+     * Acknowledges a list of messages in a single network round-trip.
+     *
+     * <p>All entries are packed into one {@code AckMessageRequest} per (topic, broker) group and
+     * written out in a single RPC, which is significantly more efficient than calling
+     * {@link #ack(MessageView)} in a loop.
+     *
+     * @param messageViews the messages to acknowledge; must not be {@code null}.
+     * @throws ClientException if an unrecoverable error occurs.
+     */
+    default void batchAck(List<MessageView> messageViews) throws ClientException {
+        throw new UnsupportedOperationException("batchAck is not supported without a BatchPolicy. "
+            + "Call SimpleConsumerBuilder#setBatchPolicy first.");
+    }
+
+    /**
+     * Asynchronous variant of {@link #batchAck(List)}.
+     *
+     * @param messageViews the messages to acknowledge; must not be {@code null}.
+     * @return a {@link CompletableFuture} that completes when all ack RPCs have finished.
+     */
+    default CompletableFuture<Void> batchAckAsync(List<MessageView> messageViews) {
+        throw new UnsupportedOperationException("batchAckAsync is not supported without a BatchPolicy. "
+            + "Call SimpleConsumerBuilder#setBatchPolicy first.");
+    }
+
+    /**
      * Close the simple consumer and release all related resources.
      *
      * <p>Once simple consumer is closed, <strong>it could not be started once again.</strong> we maintained an FSM
