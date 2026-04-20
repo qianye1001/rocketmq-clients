@@ -144,8 +144,8 @@ public class BatchingSimpleConsumer implements SimpleConsumer {
     /**
      * {@inheritDoc}
      *
-     * <p>Delegates to the underlying consumer's true batch-ack, sending all entries in a single
-     * network round-trip per (endpoints, topic) group.
+     * <p>Delegates to the underlying consumer's batch-ack, which groups entries by
+     * (endpoints, topic) and splits each group into bounded chunks before sending RPCs.
      */
     @Override
     public void batchAck(List<MessageView> messageViews) throws ClientException {

@@ -139,8 +139,9 @@ public class BatchSimpleConsumerExample {
             }
 
             // Batch-acknowledge all successfully-processed messages in one shot.
-            // Under the hood this groups entries by (broker endpoint, topic) and sends
-            // a single AckMessageRequest per group, avoiding per-message RPC overhead.
+            // Under the hood this groups entries by (broker endpoint, topic) and splits
+            // each group into bounded chunks (default 512 entries per RPC) to avoid
+            // oversized payloads, while still being much more efficient than per-message ack.
             if (!toAck.isEmpty()) {
                 try {
                     consumer.batchAck(toAck);

@@ -210,10 +210,11 @@ public interface SimpleConsumer extends Closeable {
     }
 
     /**
-     * Acknowledges a list of messages in a single network round-trip.
+     * Acknowledges a list of messages in batch.
      *
-     * <p>All entries are packed into one {@code AckMessageRequest} per (topic, broker) group and
-     * written out in a single RPC, which is significantly more efficient than calling
+     * <p>All entries are grouped by (topic, broker) and each group is further split into chunks
+     * of a bounded size to prevent oversized RPC payloads.  Each chunk is sent as a single
+     * {@code AckMessageRequest}, which is significantly more efficient than calling
      * {@link #ack(MessageView)} in a loop.
      *
      * @param messageViews the messages to acknowledge; must not be {@code null}.

@@ -69,7 +69,15 @@ import org.slf4j.LoggerFactory;
 @SuppressWarnings({"NullableProblems"})
 public abstract class ConsumerImpl extends ClientImpl {
     static final Pattern CONSUMER_GROUP_PATTERN = Pattern.compile("^[%a-zA-Z0-9_-]+$");
+
+    /**
+     * Maximum number of ack entries packed into a single {@link AckMessageRequest}.
+     * Prevents oversized gRPC payloads and reduces server-side per-request pressure.
+     */
+    static final int MAX_ACK_ENTRIES_PER_RPC = 512;
+
     private static final Logger log = LoggerFactory.getLogger(ConsumerImpl.class);
+
     protected final Resource groupResource;
 
     ConsumerImpl(ClientConfiguration clientConfiguration, String consumerGroup, Set<String> topics) {
@@ -163,11 +171,11 @@ public abstract class ConsumerImpl extends ClientImpl {
     }
 
     /**
-     * Acknowledges a batch of messages in a single RPC per (topic, endpoints) group.
+     * Acknowledges a batch of messages grouped by (endpoints, topic).
      *
-     * <p>Messages are grouped by their target endpoints and topic, then a single
-     * {@link AckMessageRequest} with multiple {@link AckMessageEntry} entries is sent for each
-     * group.  This avoids the overhead of one RPC per message.
+     * <p>Messages are first grouped by their target endpoints and topic.  Each group is then
+     * further split into chunks of at most {@link #MAX_ACK_ENTRIES_PER_RPC} entries to keep
+     * individual gRPC payloads small and to reduce server-side per-request pressure.
      *
      * @param messageViews the messages to acknowledge; all elements must be {@link MessageViewImpl}.
      * @return a future that completes when <em>all</em> underlying RPCs have completed.
@@ -186,7 +194,11 @@ public abstract class ConsumerImpl extends ClientImpl {
             final Endpoints endpoints = endpointsEntry.getKey();
             for (Map.Entry<String, List<MessageViewImpl>> topicEntry : endpointsEntry.getValue().entrySet()) {
                 final List<MessageViewImpl> batch = topicEntry.getValue();
-                futures.add(doBatchAck(endpoints, batch));
+                // Split into chunks to avoid oversized RPC payloads.
+                for (int i = 0; i < batch.size(); i += MAX_ACK_ENTRIES_PER_RPC) {
+                    final int end = Math.min(i + MAX_ACK_ENTRIES_PER_RPC, batch.size());
+                    futures.add(doBatchAck(endpoints, batch.subList(i, end)));
+                }
             }
         }
         return Futures.whenAllComplete(futures).call(() -> {
